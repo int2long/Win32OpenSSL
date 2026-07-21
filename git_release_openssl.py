@@ -5,16 +5,13 @@ git_release_openssl.py
 为指定的一个或多个 OpenSSL 版本创建 GitHub Release，
 将该版本所有安装包作为 release 资产（assets）上传，并保持 Git 仓库与 Release 一致：
 
-  1. 调用 GitHub CLI 创建 Release 并上传安装包；
-  2. Release 说明（--notes）是一张 Markdown 表格：
-
-        | name | From |
-
-     其中 name = 安装包文件名，From = 对应官方原始下载地址（slproweb）；
-  3. 在 README.MD / README-EN.MD 的「版本发布记录」中插入一条
-     可点击跳转到对应 Release 页面的记录；
-  4. 将文档改动（发布记录）提交到 Git，并以版本号创建 annotated 标签；
-  5. 推送分支与标签。
+  1. 在 README.MD / README-EN.MD 的「版本发布记录」中插入一条
+     可点击跳转到对应 Release 页面的记录（URL 依据 git remote 确定性推断）；
+  2. 将文档改动（发布记录）提交到 Git 并推送；
+  3. 调用 GitHub CLI 创建 Release 并上传安装包
+     （远程标签默认指向当前 HEAD，即刚提交的文档版本，确保标签落在含发布记录的提交上）；
+  4. 以版本号创建本地 annotated 标签（指向当前 HEAD），并推送标签；
+  5. 完成。
 
 注意：安装包二进制文件仅通过 `gh release create` 上传到 GitHub Release，
 **绝不纳入 Git 仓库**——Git 仓库只保留说明文档与发布索引，避免仓库体积膨胀。
@@ -120,8 +117,9 @@ def fallback_release_url(version: str) -> str:
 
 
 def insert_release_record(path: str, heading: str, header_row: str,
-                          sep_row: str, row: str) -> bool:
-    """在文档的「版本发布记录」表中插入一行（无该章节则自动创建）。"""
+                          sep_row: str, row: str, version: str = "") -> bool:
+    """在文档的「版本发布记录」表中插入一行（无该章节则自动创建）。
+    若 version 已存在于表中则跳过，避免重跑时重复插入。"""
     if not os.path.isfile(path):
         print(f"[WARN] 文档不存在，跳过插入: {path}", file=sys.stderr)
         return False
@@ -158,6 +156,12 @@ def insert_release_record(path: str, heading: str, header_row: str,
             lines.insert(at + 1, header_row)
             lines.insert(at + 2, sep_row)
             sep_i = at + 2
+        # 已存在同版本记录则跳过（避免重跑重复插入）
+        if version:
+            for j in range(sep_i + 1, len(lines)):
+                if lines[j].strip().startswith("|") and version in lines[j]:
+                    print(f"[INFO] {path} 已存在版本 {version} 的发布记录，跳过插入。")
+                    return False
         # 在分隔行之后插入（最新记录置顶）
         lines.insert(sep_i + 1, row)
 
@@ -217,11 +221,10 @@ def main():
          lambda v, u: f"| {v} | [GitHub Release]({u}) |"),
     ]
 
-    base_commit = git("rev-parse", "HEAD").stdout.strip()
-
-    released = []  # (version, url)
+    # 第一阶段：准备每个版本（校验、收集安装包、构建 notes），暂不调用 gh
+    pending = []  # (version, notes, found_files)
     for version in args.ver:
-        print(f"\n===== 处理版本 {version} =====")
+        print(f"\n===== 准备版本 {version} =====")
         if release_exists(version):
             print(f"[SKIP] 版本 {version} 的 Release 已存在，跳过。", file=sys.stderr)
             continue
@@ -244,7 +247,40 @@ def main():
         rows = [(os.path.basename(rel), name_to_url.get(os.path.basename(rel), "未知"))
                 for rel in found]
         notes = build_notes(rows)
+        pending.append((version, notes, found))
 
+    # 第二阶段：先在本地文档插入发布记录（URL 由 git remote 确定性推断，无需先调 gh），
+    # 提交并推送。这样后续 gh 创建的远程标签将落在「含发布记录的文档提交」上。
+    if pending:
+        for version, _, _ in pending:
+            url = fallback_release_url(version)
+            for path, heading, hdr, sep, fmt in doc_specs:
+                row = fmt(version, url)
+                insert_release_record(path, heading, hdr, sep, row, version)
+        print(f"\n[OK] 已在文档插入 {len(pending)} 条发布记录。")
+
+        # Git 提交（仅文档：安装包只上传到 GitHub Release，绝不纳入 Git 仓库）
+        stage = ["README.MD", "README-EN.MD"]
+        git("add", *stage)
+        if git("diff", "--cached", "--quiet").returncode == 0:
+            print("[INFO] 没有需要提交的改动。")
+        else:
+            msg = "release: " + ", ".join(v for v, _, _ in pending)
+            git("commit", "-m", msg)
+            print(f"[OK] 已提交：{msg}")
+
+        # 推送文档分支（此时尚未打标签，标签在 gh 创建后再推）
+        branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        pr = git("push", "origin", branch)
+        if pr.returncode != 0:
+            print("[ERROR] 文档推送失败，请检查远程配置与登录状态：", file=sys.stderr)
+            print(pr.stderr, file=sys.stderr)
+        else:
+            print("[OK] 已推送文档分支。")
+
+    # 第三阶段：本地文档已提交并推送，再调用 gh 创建 Release。
+    # gh 默认以当前 HEAD（即含发布记录的文档提交）创建远程标签，标签不再落在「上一条」。
+    for version, notes, found in pending:
         cmd = [GH, "release", "create", version,
                "--title", version, "--notes", notes, *found]
         print(">>> " + " ".join(cmd))
@@ -253,48 +289,25 @@ def main():
             print(f"[ERROR] 版本 {version} Release 创建失败（gh 返回码 {rc}）。",
                   file=sys.stderr)
             continue
-
         url = get_release_url(version)
-        released.append((version, url))
         print(f"[OK] 版本 {version} Release 已创建: {url}")
 
-    if not released:
-        print("\n没有需要发布的版本，结束。")
-        return
-
-    # 文档插入发布记录
-    for version, url in released:
-        for path, heading, hdr, sep, fmt in doc_specs:
-            row = fmt(version, url)
-            insert_release_record(path, heading, hdr, sep, row)
-    print(f"\n[OK] 已在文档插入 {len(released)} 条发布记录。")
-
-    # Git 提交（仅文档：安装包只上传到 GitHub Release，绝不纳入 Git 仓库，避免仓库体积膨胀）
-    stage = ["README.MD", "README-EN.MD"]
-    git("add", *stage)
-    if git("diff", "--cached", "--quiet").returncode == 0:
-        print("[INFO] 没有需要提交的改动。")
-    else:
-        msg = "release: " + ", ".join(v for v, _ in released)
-        git("commit", "-m", msg)
-        print(f"[OK] 已提交：{msg}")
-
-    # 打标签（指向发布前的基线提交，与 gh 创建的远程标签一致）
-    for version, _ in released:
+    # 第四阶段：以版本号创建本地 annotated 标签（指向当前 HEAD = 含发布记录的文档提交），
+    # 并推送标签，与 gh 创建的远程标签保持一致。
+    for version, _, _ in pending:
         if git("rev-parse", f"refs/tags/{version}").returncode == 0:
             print(f"[SKIP] 标签 {version} 已存在。")
             continue
-        git("tag", "-a", version, "-m", version, base_commit)
+        # 不指定 commit -> 指向当前 HEAD
+        git("tag", "-a", version, "-m", version)
         print(f"[OK] 已创建标签：{version}")
 
-    # 推送分支与标签
-    branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-    pr = git("push", "origin", branch, "--follow-tags")
-    if pr.returncode != 0:
-        print("[ERROR] 推送失败，请检查远程配置与登录状态：", file=sys.stderr)
-        print(pr.stderr, file=sys.stderr)
+    pt = git("push", "origin", "--tags")
+    if pt.returncode != 0:
+        print("[ERROR] 标签推送失败，请检查远程配置与登录状态：", file=sys.stderr)
+        print(pt.stderr, file=sys.stderr)
     else:
-        print("[OK] 已推送分支与标签。")
+        print("[OK] 已推送标签。")
 
     print("\n完成。")
 
