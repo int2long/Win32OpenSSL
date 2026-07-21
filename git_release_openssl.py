@@ -10,7 +10,7 @@ git_release_openssl.py
   2. 将文档改动（发布记录）提交到 Git 并推送；
   3. 调用 GitHub CLI 创建 Release 并上传安装包
      （远程标签默认指向当前 HEAD，即刚提交的文档版本，确保标签落在含发布记录的提交上）；
-  4. 以版本号创建本地 annotated 标签（指向当前 HEAD），并推送标签；
+  4. gh 已创建远程标签，拉取（同步）到本地，使本地标签与远程一致；不再推送全部标签以免冲突；
   5. 完成。
 
 注意：安装包二进制文件仅通过 `gh release create` 上传到 GitHub Release，
@@ -292,22 +292,24 @@ def main():
         url = get_release_url(version)
         print(f"[OK] 版本 {version} Release 已创建: {url}")
 
-    # 第四阶段：以版本号创建本地 annotated 标签（指向当前 HEAD = 含发布记录的文档提交），
-    # 并推送标签，与 gh 创建的远程标签保持一致。
+    # 第四阶段：gh 已为该版本创建远程标签（指向含发布记录的文档提交）。
+    # 直接拉取远程标签到本地即可，使本地标签与远程一致；
+    # 不再使用 `git push --tags`（会推送所有本地标签，极易与远程已有标签冲突被拒绝）。
+    # 若本地已存在同名标签（可能来自历史运行、指向不同提交），先删除再拉取，确保与远程一致。
     for version, _, _ in pending:
-        if git("rev-parse", f"refs/tags/{version}").returncode == 0:
-            print(f"[SKIP] 标签 {version} 已存在。")
-            continue
-        # 不指定 commit -> 指向当前 HEAD
-        git("tag", "-a", version, "-m", version)
-        print(f"[OK] 已创建标签：{version}")
-
-    pt = git("push", "origin", "--tags")
-    if pt.returncode != 0:
-        print("[ERROR] 标签推送失败，请检查远程配置与登录状态：", file=sys.stderr)
-        print(pt.stderr, file=sys.stderr)
-    else:
-        print("[OK] 已推送标签。")
+        git("tag", "-d", version)  # 删除本地可能存在的同名标签（返回码忽略）
+        r = git("fetch", "origin", f"refs/tags/{version}:refs/tags/{version}")
+        if r.returncode == 0:
+            print(f"[OK] 已同步标签：{version}")
+        else:
+            # 极少数情况：远程标签不存在（gh 未创建），本地创建并单独推送该标签
+            git("tag", "-a", version, "-m", version)
+            pr = git("push", "origin", version)
+            if pr.returncode == 0:
+                print(f"[OK] 已创建并推送标签：{version}")
+            else:
+                print(f"[ERROR] 标签 {version} 创建/推送失败：", file=sys.stderr)
+                print(pr.stderr, file=sys.stderr)
 
     print("\n完成。")
 
