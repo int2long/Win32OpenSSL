@@ -105,6 +105,7 @@ The repository contains no binary files. Click a link to download each version's
 
 | Version | Release |
 | --- | --- |
+| 3_0_21 | [GitHub Release](https://github.com/int2long/Win32OpenSSL/releases/tag/3_0_21) |
 | 1_1_1w | [GitHub Release](https://github.com/int2long/Win32OpenSSL/releases/tag/1_1_1w) |
 
 ## Important Notes

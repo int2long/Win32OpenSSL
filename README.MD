@@ -105,6 +105,7 @@ python git_release_openssl.py 3_0_21 -p 3_0_21 other_dir
 
 | 版本 | 发布链接 |
 | --- | --- |
+| 3_0_21 | [GitHub Release](https://github.com/int2long/Win32OpenSSL/releases/tag/3_0_21) |
 | 1_1_1w | [GitHub Release](https://github.com/int2long/Win32OpenSSL/releases/tag/1_1_1w) |
 
 ## 重要说明
